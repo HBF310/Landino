@@ -1,0 +1,1664 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Landino AI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              'brand-bg': '#121212',
+              'brand-surface': '#1e1e1e',
+              'brand-surface-alt': '#2a2a2a',
+              'brand-primary': '#14b8a6',
+              'brand-primary-hover': '#0d9488',
+              'brand-text': '#e5e7eb',
+              'brand-text-muted': '#9ca3af',
+            },
+          }
+        }
+      }
+    </script>
+  <script type="importmap">
+{
+  "imports": {
+    "react/": "https://esm.sh/react@^19.1.0/",
+    "react": "https://esm.sh/react@^19.1.0",
+    "react-dom/client": "https://esm.sh/react-dom@^19.1.0/client",
+    "@google/genai": "https://esm.sh/@google/genai@^1.7.0",
+    "react-markdown": "https://esm.sh/react-markdown@^10.1.0",
+    "remark-gfm": "https://esm.sh/remark-gfm@^4.0.1",
+    "@babel/standalone": "https://esm.sh/@babel/standalone@7.24.9",
+    "react-dom/": "https://esm.sh/react-dom@^19.1.0/"
+  }
+}
+</script>
+</head>
+  <body class="bg-brand-bg">
+    <div id="root"></div>
+    <script type="text/babel" data-type="module">
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import ReactDOM from 'react-dom/client';
+import { GoogleGenAI, Type } from "@google/genai";
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import Babel from '@babel/standalone';
+
+// --- From types.ts ---
+const MessageSender = {
+  USER: 'user',
+  AI: 'ai',
+};
+// Interfaces are removed for JS runtime, but Babel understands TS syntax
+// so we can leave them for context during development if needed.
+/*
+export interface Source {
+  uri: string;
+  title: string;
+}
+
+export interface Message {
+  id: string;
+  text: string;
+  sender: MessageSender;
+  sources?: Source[];
+}
+
+export interface Task {
+  id: string;
+  text: string;
+  completed: boolean;
+}
+
+export interface Conversation {
+  id: string;
+  title: string;
+  timestamp: number;
+  messages: Message[];
+}
+*/
+// Updated ActiveView to include 'games'
+// export type ActiveView = 'new-chat' | 'history' | 'tasks' | 'image-generation' | 'settings' | 'ultra-js' | 'games';
+
+
+// --- From services/geminiService.ts ---
+const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+const DEFAULT_SYSTEM_INSTRUCTION = `You are Landino, a highly intelligent and slightly witty AI assistant. 
+Your purpose is to provide clear, concise, and helpful information. 
+You are friendly but maintain a professional demeanor.
+Format your responses using markdown where appropriate (e.g., lists, bold text, code blocks) to improve readability.
+Never say you are a language model. You are Landino.
+`;
+
+const convertMessagesToHistory = (messages) => {
+  return messages.map(msg => ({
+    role: msg.sender === MessageSender.USER ? 'user' : 'model',
+    parts: [{ text: msg.text }],
+  }));
+};
+
+const createChat = (systemInstruction, history = []) => {
+  return ai.chats.create({
+    model: 'gemini-2.5-flash-preview-04-17',
+    config: {
+      systemInstruction: systemInstruction,
+    },
+    history,
+  });
+};
+
+const generateImage = async (prompt) => {
+    const response = await ai.models.generateImages({
+        model: 'imagen-3.0-generate-002',
+        prompt: prompt,
+        config: {numberOfImages: 1, outputMimeType: 'image/jpeg'},
+    });
+
+    if (!response.generatedImages || response.generatedImages.length === 0 || !response.generatedImages[0].image) {
+        throw new Error("No image was generated. This might be due to the safety policy. Please try a different prompt.");
+    }
+
+    const base64ImageBytes = response.generatedImages[0].image.imageBytes;
+    return `data:image/jpeg;base64,${base64ImageBytes}`;
+}
+
+
+// --- From hooks/useHistory.ts ---
+const HISTORY_KEY = 'landino-chat-history';
+
+const useHistory = () => {
+  const [history, setHistory] = useState([]);
+  const [isLoaded, setIsLoaded] = useState(false);
+
+  useEffect(() => {
+    try {
+      const storedHistory = localStorage.getItem(HISTORY_KEY);
+      if (storedHistory) {
+        setHistory(JSON.parse(storedHistory).sort((a, b) => b.timestamp - a.timestamp));
+      }
+    } catch (error) {
+      console.error("Failed to load history from localStorage", error);
+    } finally {
+        setIsLoaded(true);
+    }
+  }, []);
+
+  const saveConversation = useCallback((conversation) => {
+    setHistory(prevHistory => {
+      const existingIndex = prevHistory.findIndex(c => c.id === conversation.id);
+      let newHistory;
+      if (existingIndex > -1) {
+        newHistory = [...prevHistory];
+        newHistory[existingIndex] = conversation;
+      } else {
+        newHistory = [conversation, ...prevHistory];
+      }
+      
+      const sortedHistory = newHistory.sort((a, b) => b.timestamp - a.timestamp);
+
+      try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(sortedHistory));
+      } catch (error) {
+        console.error("Failed to save history to localStorage", error);
+      }
+      return sortedHistory;
+    });
+  }, []);
+
+  const deleteConversation = useCallback((id) => {
+    setHistory(prevHistory => {
+      const newHistory = prevHistory.filter(c => c.id !== id);
+      try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(newHistory));
+      } catch (error) {
+        console.error("Failed to delete history from localStorage", error);
+      }
+      return newHistory;
+    });
+  }, []);
+
+  const clearAllHistory = useCallback(() => {
+    setHistory([]);
+    try {
+      localStorage.removeItem(HISTORY_KEY);
+    } catch (error) {
+      console.error("Failed to clear history from localStorage", error);
+    }
+  }, []);
+
+  return { history, isLoaded, saveConversation, deleteConversation, clearAllHistory };
+};
+
+
+// --- From hooks/useTasks.ts ---
+const TASKS_KEY = 'landino-tasks';
+
+const useTasks = () => {
+  const [tasks, setTasks] = useState([]);
+
+  useEffect(() => {
+    try {
+      const storedTasks = localStorage.getItem(TASKS_KEY);
+      if (storedTasks) {
+        setTasks(JSON.parse(storedTasks));
+      }
+    } catch (error) {
+      console.error("Failed to load tasks from localStorage", error);
+    }
+  }, []);
+
+  const persistTasks = (updatedTasks) => {
+    try {
+      localStorage.setItem(TASKS_KEY, JSON.stringify(updatedTasks));
+    } catch (error) {
+      console.error("Failed to save tasks to localStorage", error);
+    }
+  };
+
+  const addTask = useCallback((text) => {
+    const newTask = {
+      id: Date.now().toString(),
+      text: text.trim(),
+      completed: false,
+    };
+    setTasks(prevTasks => {
+        const updatedTasks = [...prevTasks, newTask];
+        persistTasks(updatedTasks);
+        return updatedTasks;
+    });
+    return { success: true, message: `Task "${text}" has been added.` };
+  }, []);
+
+  const deleteTask = useCallback((id) => {
+    setTasks(prevTasks => {
+        const updatedTasks = prevTasks.filter(task => task.id !== id);
+        persistTasks(updatedTasks);
+        return updatedTasks;
+    });
+  }, []);
+
+  const toggleTask = useCallback((id) => {
+    setTasks(prevTasks => {
+        const updatedTasks = prevTasks.map(task =>
+            task.id === id ? { ...task, completed: !task.completed } : task
+        );
+        persistTasks(updatedTasks);
+        return updatedTasks;
+    });
+  }, []);
+  
+  const listTasks = useCallback((filter = 'all') => {
+    let tasksToList = tasks;
+    if (filter === 'completed') {
+        tasksToList = tasks.filter(t => t.completed);
+    } else if (filter === 'pending') {
+        tasksToList = tasks.filter(t => !t.completed);
+    }
+
+    if (tasksToList.length === 0) {
+        if (filter === 'all') {
+            return 'You have no tasks at the moment.';
+        }
+        return `You have no ${filter} tasks.`;
+    }
+
+    const taskListString = tasksToList.map(t => `- [${t.completed ? 'x' : ' '}] ${t.text}`).join('\\n');
+    const title = filter === 'all' ? 'your tasks' : `your ${filter} tasks`;
+    return `Here are ${title}:\\n${taskListString}`;
+}, [tasks]);
+
+  return { tasks, addTask, deleteTask, toggleTask, listTasks };
+};
+
+
+// --- From components/Icon.tsx ---
+const BotIcon = ({ className }) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+    fill="currentColor"
+    className={className}
+    aria-hidden="true"
+  >
+    <path
+      fillRule="evenodd"
+      d="M4.5 3.75a3 3 0 00-3 3v10.5a3 3 0 003 3h15a3 3 0 003-3V6.75a3 3 0 00-3-3h-15zm4.125 3a3.375 3.375 0 00-3.375 3.375c0 1.86 1.515 3.375 3.375 3.375s3.375-1.515 3.375-3.375c0-1.86-1.515-3.375-3.375-3.375zm0 5.25a1.875 1.875 0 100-3.75 1.875 1.875 0 000 3.75zm8.25-5.25a3.375 3.375 0 00-3.375 3.375c0 1.86 1.515 3.375 3.375 3.375s3.375-1.515 3.375-3.375c0-1.86-1.515-3.375-3.375-3.375zm0 5.25a1.875 1.875 0 100-3.75 1.875 1.875 0 000 3.75z"
+      clipRule="evenodd"
+    />
+    <path d="M9.661 15.121a.75.75 0 00-1.06 1.06l1.743 1.742a2.25 2.25 0 003.182 0l1.743-1.742a.75.75 0 10-1.06-1.06l-1.743 1.742a.75.75 0 01-1.06 0l-1.743-1.742z" />
+  </svg>
+);
+
+const UserIcon = ({ className }) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+    fill="currentColor"
+    className={className}
+    aria-hidden="true"
+  >
+    <path
+      fillRule="evenodd"
+      d="M18.685 19.097A9.723 9.723 0 0021.75 12c0-5.385-4.365-9.75-9.75-9.75S2.25 6.615 2.25 12a9.723 9.723 0 003.065 7.097A9.716 9.716 0 0012 21.75a9.716 9.716 0 006.685-2.653zm-12.54-1.285A7.486 7.486 0 0112 15a7.486 7.486 0 015.855 2.812A8.224 8.224 0 0112 20.25a8.224 8.224 0 01-5.855-2.438zM15.75 9a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0z"
+      clipRule="evenodd"
+    />
+  </svg>
+);
+
+const SendIcon = ({ className }) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+    fill="currentColor"
+    className={className}
+    aria-hidden="true"
+  >
+    <path d="M3.478 2.405a.75.75 0 00-.926.94l2.432 7.905H13.5a.75.75 0 010 1.5H4.984l-2.432 7.905a.75.75 0 00.926.94 60.519 60.519 0 0018.445-8.986.75.75 0 000-1.218A60.517 60.517 0 003.478 2.405z" />
+  </svg>
+);
+
+const SearchIcon = ({ className }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className} aria-hidden="true">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+    </svg>
+);
+
+const CheckIcon = ({ className }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className} aria-hidden="true">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+    </svg>
+);
+
+const NewChatIcon = ({ className }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className} aria-hidden="true">
+    <path strokeLinecap="round" strokeLinejoin="round" d="M12 20.25c4.97 0 9-3.694 9-8.25s-4.03-8.25-9-8.25S3 7.444 3 12c0 2.104.859 4.023 2.273 5.48.432.447.74 1.04.586 1.641a4.483 4.483 0 01-.923 1.785A5.969 5.969 0 006 21c1.282 0 2.47-.402 3.445-1.087.81.22 1.668.337 2.555.337z" />
+  </svg>
+);
+
+const HistoryIcon = ({ className }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className} aria-hidden="true">
+    <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" />
+  </svg>
+);
+
+const TasksIcon = ({ className }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className} aria-hidden="true">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+    </svg>
+);
+
+const ImageIcon = ({ className }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" />
+    </svg>
+);
+
+const SettingsIcon = ({ className }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.324.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.438.995s.145.755.438.995l1.003.827c.48.398.668 1.03.26 1.431l-1.296 2.247a1.125 1.125 0 01-1.37.49l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.127c-.331.183-.581.495-.644.87l-.213 1.281c-.09.543-.56.94-1.11.94h-2.594c-.55 0-1.02-.398-1.11-.94l-.213-1.281c-.063-.374-.313-.686-.645-.87a6.52 6.52 0 01-.22-.127c-.324-.196-.72-.257-1.075-.124l-1.217.456a1.125 1.125 0 01-1.37-.49l-1.296-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.437-.995s-.145-.755-.437-.995l-1.004-.827a1.125 1.125 0 01-.26-1.431l1.296-2.247a1.125 1.125 0 011.37-.49l1.217.456c.355.133.75.072 1.076-.124.072-.044.146-.087.22-.127.332-.183.582-.495.645-.87l.212-1.281zM12 15a3 3 0 100-6 3 3 0 000 6z" />
+    </svg>
+);
+
+const CodeBracketIcon = ({ className }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 12" />
+    </svg>
+);
+
+const GameControllerIcon = ({ className }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M6 12h.01M12 12h.01M18 12h.01M7 17h.01M11 17h2M17 17h.01M4 12a2 2 0 114 0 2 2 0 01-4 0zM10 12a2 2 0 114 0 2 2 0 01-4 0zM16 12a2 2 0 114 0 2 2 0 01-4 0zM5.636 6.364a9 9 0 1112.728 0M12 3v1m0 16v1" />
+    </svg>
+);
+
+const LogoutIcon = ({ className }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className} aria-hidden="true">
+    <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9" />
+  </svg>
+);
+
+const PlusIcon = ({ className }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden="true">
+        <path fillRule="evenodd" d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25zM12.75 9a.75.75 0 00-1.5 0v2.25H9a.75.75 0 000 1.5h2.25V15a.75.75 0 001.5 0v-2.25H15a.75.75 0 000-1.5h-2.25V9z" clipRule="evenodd" />
+    </svg>
+);
+
+const TrashIcon = ({ className }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className={className} aria-hidden="true">
+    <path fillRule="evenodd" d="M16.5 4.478v.227a48.816 48.816 0 013.878.512.75.75 0 11-.256 1.478l-.209-.035-1.005 13.006a.75.75 0 01-.749.658h-7.5a.75.75 0 01-.749-.658L5.168 6.648l-.209.035a.75.75 0 01-.256-1.478A48.567 48.567 0 017.5 4.705v-.227c0-1.564 1.213-2.9 2.816-2.9h1.368c1.603 0 2.816 1.336 2.816 2.9zM12 18a.75.75 0 01.75-.75h.008a.75.75 0 010 1.5h-.008A.75.75 0 0112 18zm-2.25-2.25a.75.75 0 00-.75.75v.008a.75.75 0 001.5 0v-.008a.75.75 0 00-.75-.75zm4.5 0a.75.75 0 00-.75.75v.008a.75.75 0 001.5 0v-.008a.75.75 0 00-.75-.75z" clipRule="evenodd" />
+  </svg>
+);
+
+const UploadIcon = ({ className }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+    </svg>
+);
+
+const ExternalLinkIcon = ({ className }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-4.5 0V6.375c0-.621.504-1.125 1.125-1.125h4.5c.621 0 1.125.504 1.125 1.125v4.5c0 .621-.504 1.125-1.125 1.125h-4.5" />
+    </svg>
+);
+
+
+// --- From components/ChatMessage.tsx ---
+const ChatMessage = ({ message, avatarUrl }) => {
+  const isAI = message.sender === MessageSender.AI;
+
+  const Avatar = () => {
+    if (isAI) {
+      if (avatarUrl) {
+        return <img src={avatarUrl} alt="Landino" className="w-8 h-8 rounded-full object-cover flex-shrink-0" />;
+      }
+      return <BotIcon className="w-8 h-8 flex-shrink-0 text-brand-text-muted" />;
+    }
+    return <UserIcon className="w-8 h-8 flex-shrink-0 text-white bg-brand-primary rounded-full p-1" />;
+  };
+  
+  const alignment = isAI ? 'justify-start' : 'justify-end';
+  const bubbleColor = isAI ? 'bg-brand-surface-alt' : 'bg-brand-primary';
+
+  return (
+    <div className={`flex items-start gap-3 ${alignment}`}>
+      {isAI && <Avatar />}
+      <div
+        className={`max-w-xl lg:max-w-3xl px-4 py-3 rounded-2xl ${bubbleColor}`}
+      >
+        <div className="prose prose-invert prose-sm max-w-none prose-p:my-0 prose-headings:my-2 prose-ul:my-2 prose-ol:my-2 prose-pre:my-2">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown>
+        </div>
+        {message.sources && message.sources.length > 0 && (
+          <div className="mt-3 pt-3 border-t border-brand-primary/20">
+            <h4 className="text-xs font-semibold uppercase text-brand-text-muted mb-2">Sources</h4>
+            <div className="flex flex-col gap-2">
+              {message.sources.map((source, index) => (
+                <a 
+                  href={source.uri} 
+                  target="_blank" 
+                  rel="noopener noreferrer" 
+                  key={index} 
+                  className="flex items-center gap-2 text-xs text-brand-text-muted hover:text-brand-primary transition-colors truncate"
+                >
+                  <ExternalLinkIcon className="w-4 h-4 flex-shrink-0"/>
+                  <span className="truncate" title={source.title}>{source.title || source.uri}</span>
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+      {!isAI && <Avatar />}
+    </div>
+  );
+};
+
+
+// --- From components/ChatInput.tsx ---
+const ChatInput = ({ onSendMessage, isLoading, isSearchEnabled, onSearchToggle }) => {
+  const [text, setText] = useState('');
+  const textareaRef = useRef(null);
+
+  const handleInputChange = (e) => {
+    setText(e.target.value);
+  };
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (text.trim() && !isLoading) {
+      onSendMessage(text.trim());
+      setText('');
+    }
+  };
+  
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSubmit(e);
+    }
+  };
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (textarea) {
+      textarea.style.height = 'auto';
+      const scrollHeight = textarea.scrollHeight;
+      // Max height to prevent infinite growth
+      const maxHeight = 200; 
+      textarea.style.height = `${Math.min(scrollHeight, maxHeight)}px`;
+      textarea.style.overflowY = scrollHeight > maxHeight ? 'auto' : 'hidden';
+    }
+  }, [text]);
+
+  return (
+    <div className="bg-brand-surface/70 backdrop-blur-sm p-4 border-t border-brand-surface-alt">
+      <form onSubmit={handleSubmit} className="max-w-4xl mx-auto flex items-end gap-3">
+        <div className="flex-grow relative">
+          <textarea
+            ref={textareaRef}
+            value={text}
+            onChange={handleInputChange}
+            onKeyDown={handleKeyDown}
+            placeholder="Message Landino..."
+            disabled={isLoading}
+            rows={1}
+            className="w-full bg-brand-surface-alt text-brand-text placeholder-brand-text-muted rounded-xl py-3 pl-4 pr-12 resize-none focus:outline-none focus:ring-2 focus:ring-brand-primary transition-shadow duration-200 disabled:opacity-60"
+          />
+        </div>
+         <button
+          type="button"
+          onClick={onSearchToggle}
+          className={`p-3 flex-shrink-0 rounded-full hover:bg-brand-surface-alt transition-colors duration-200 ${isSearchEnabled ? 'bg-brand-primary text-white' : 'bg-brand-surface-alt text-brand-text-muted'}`}
+          aria-label="Toggle Google Search"
+          title="Toggle Google Search"
+        >
+          <SearchIcon className="w-6 h-6" />
+        </button>
+        <button
+          type="submit"
+          disabled={isLoading || !text.trim()}
+          className="bg-brand-primary text-white rounded-full p-3 flex-shrink-0 hover:bg-brand-primary-hover disabled:bg-brand-surface-alt disabled:text-brand-text-muted disabled:cursor-not-allowed transition-colors duration-200"
+          aria-label="Send message"
+        >
+          <SendIcon className="w-6 h-6" />
+        </button>
+      </form>
+    </div>
+  );
+};
+
+
+// --- From screens/LoginScreen.tsx ---
+const LoginScreen = ({ onLogin }) => {
+  return (
+    <div className="flex items-center justify-center min-h-screen bg-brand-bg text-brand-text">
+      <div className="w-full max-w-sm p-8 space-y-8 bg-brand-surface rounded-2xl shadow-lg">
+        <div className="flex flex-col items-center space-y-4">
+          <BotIcon className="w-20 h-20 text-brand-primary" />
+          <h1 className="text-3xl font-bold text-center">Welcome to Landino AI</h1>
+          <p className="text-center text-brand-text-muted">
+            Your intelligent assistant for chat, tasks, and more.
+          </p>
+        </div>
+        <form className="space-y-6" onSubmit={(e) => { e.preventDefault(); onLogin(); }}>
+          <div>
+            <label htmlFor="email" className="block text-sm font-medium text-brand-text-muted">
+              Email address
+            </label>
+            <div className="mt-1">
+              <input
+                id="email"
+                name="email"
+                type="email"
+                autoComplete="email"
+                required
+                defaultValue="demo@landino.ai"
+                className="w-full px-3 py-2 text-brand-text bg-brand-surface-alt border border-brand-surface-alt rounded-md shadow-sm placeholder-brand-text-muted focus:outline-none focus:ring-2 focus:ring-brand-primary"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label htmlFor="password"className="block text-sm font-medium text-brand-text-muted">
+              Password
+            </label>
+            <div className="mt-1">
+              <input
+                id="password"
+                name="password"
+                type="password"
+                autoComplete="current-password"
+                required
+                defaultValue="password"
+                className="w-full px-3 py-2 text-brand-text bg-brand-surface-alt border border-brand-surface-alt rounded-md shadow-sm placeholder-brand-text-muted focus:outline-none focus:ring-2 focus:ring-brand-primary"
+              />
+            </div>
+          </div>
+          
+          <button
+            type="submit"
+            className="w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-brand-primary hover:bg-brand-primary-hover focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-brand-surface focus:ring-brand-primary transition-colors"
+          >
+            Sign in
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+};
+
+
+// --- From screens/HistoryView.tsx ---
+const HistoryView = ({ history, isLoaded, onLoadConversation, onDeleteConversation }) => {
+
+    const handleDelete = (e, id) => {
+        e.stopPropagation();
+        if (window.confirm('Are you sure you want to delete this conversation?')) {
+            onDeleteConversation(id);
+        }
+    }
+
+  return (
+    <div className="flex-1 flex flex-col bg-brand-bg p-8 overflow-y-auto">
+      <div className="flex items-center gap-3 mb-8">
+        <HistoryIcon className="w-10 h-10 text-brand-primary" />
+        <h1 className="text-3xl font-bold text-brand-text">Chat History</h1>
+      </div>
+      
+      {!isLoaded && (
+        <div className="flex-1 flex items-center justify-center text-brand-text-muted">
+            <p>Loading history...</p>
+        </div>
+      )}
+
+      {isLoaded && history.length === 0 && (
+         <div className="flex-1 flex flex-col items-center justify-center bg-brand-surface rounded-xl border border-brand-surface-alt text-brand-text-muted p-8">
+            <HistoryIcon className="w-24 h-24 mb-4" />
+            <h2 className="text-2xl font-semibold text-brand-text">No History Yet</h2>
+            <p className="mt-2 text-center max-w-md">
+                Your conversations with Landino will appear here once you start chatting.
+            </p>
+        </div>
+      )}
+
+      {isLoaded && history.length > 0 && (
+          <div className="space-y-3">
+            {history.map(convo => (
+                <div 
+                    key={convo.id} 
+                    onClick={() => onLoadConversation(convo)}
+                    className="flex items-center justify-between bg-brand-surface p-4 rounded-lg transition-all duration-200 hover:bg-brand-surface-alt hover:ring-2 hover:ring-brand-primary cursor-pointer"
+                >
+                    <div className="flex-grow truncate pr-4">
+                        <p className="text-brand-text font-semibold truncate">{convo.title}</p>
+                        <p className="text-sm text-brand-text-muted">{new Date(convo.timestamp).toLocaleString()}</p>
+                    </div>
+                    <button onClick={(e) => handleDelete(e, convo.id)} className="text-brand-text-muted hover:text-red-500 transition-colors p-2 rounded-full hover:bg-red-500/10">
+                        <TrashIcon className="w-5 h-5" />
+                    </button>
+                </div>
+            ))}
+          </div>
+      )}
+
+    </div>
+  );
+};
+
+
+// --- From screens/TasksView.tsx ---
+const TasksView = ({ tasks, onAddTask, onDeleteTask, onToggleTask }) => {
+  const [newTaskText, setNewTaskText] = useState('');
+
+  const handleAddTask = (e) => {
+    e.preventDefault();
+    if (newTaskText.trim()) {
+      onAddTask(newTaskText);
+      setNewTaskText('');
+    }
+  };
+  
+  return (
+    <div className="flex-1 flex flex-col bg-brand-bg p-8 overflow-y-auto">
+        <div className="flex items-center gap-3 mb-8">
+            <TasksIcon className="w-10 h-10 text-brand-primary" />
+            <h1 className="text-3xl font-bold text-brand-text">My Tasks</h1>
+        </div>
+        
+        <form onSubmit={handleAddTask} className="flex gap-3 mb-8">
+            <input
+                type="text"
+                value={newTaskText}
+                onChange={(e) => setNewTaskText(e.target.value)}
+                placeholder="Add a new task..."
+                className="flex-grow bg-brand-surface-alt text-brand-text placeholder-brand-text-muted rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-brand-primary"
+            />
+            <button type="submit" className="bg-brand-primary text-white rounded-lg p-3 hover:bg-brand-primary-hover disabled:bg-brand-surface-alt disabled:cursor-not-allowed" disabled={!newTaskText.trim()}>
+                <PlusIcon className="w-6 h-6" />
+            </button>
+        </form>
+
+        <div className="space-y-3">
+            {tasks.map(task => (
+                <div key={task.id} className="flex items-center bg-brand-surface p-4 rounded-lg transition-all duration-200 hover:bg-brand-surface-alt">
+                    <input 
+                        type="checkbox"
+                        checked={task.completed}
+                        onChange={() => onToggleTask(task.id)}
+                        className="h-5 w-5 rounded bg-brand-surface-alt border-brand-text-muted text-brand-primary focus:ring-brand-primary cursor-pointer"
+                    />
+                    <span className={`flex-grow mx-4 ${task.completed ? 'line-through text-brand-text-muted' : 'text-brand-text'}`}>
+                        {task.text}
+                    </span>
+                    <button onClick={() => onDeleteTask(task.id)} className="text-brand-text-muted hover:text-red-500 transition-colors">
+                        <TrashIcon className="w-5 h-5" />
+                    </button>
+                </div>
+            ))}
+            {tasks.length === 0 && (
+                <div className="text-center py-10 text-brand-text-muted">
+                    <p>No tasks yet. Add one above to get started!</p>
+                     <p className="text-sm">You can also ask Landino to add tasks for you in the chat.</p>
+                </div>
+            )}
+        </div>
+    </div>
+  );
+};
+
+
+// --- From screens/ImageGenerationView.tsx ---
+const ImageGenerationView = () => {
+    const [prompt, setPrompt] = useState('');
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState(null);
+    const [generatedImage, setGeneratedImage] = useState(null);
+
+    const handleGenerate = async (e) => {
+        e.preventDefault();
+        if (!prompt.trim()) return;
+
+        setIsLoading(true);
+        setError(null);
+        setGeneratedImage(null);
+
+        try {
+            const imageUrl = await generateImage(prompt);
+            setGeneratedImage(imageUrl);
+        } catch (err) {
+            console.error("Image generation error:", err);
+            setError(err instanceof Error ? err.message : 'Failed to generate image. Please try again.');
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    return (
+        <div className="flex-1 flex flex-col bg-brand-bg p-8 overflow-y-auto">
+            <div className="flex items-center gap-3 mb-8">
+                <ImageIcon className="w-10 h-10 text-brand-primary" />
+                <h1 className="text-3xl font-bold text-brand-text">Image Generation</h1>
+            </div>
+
+            <form onSubmit={handleGenerate} className="flex gap-3 mb-6">
+                <input
+                    type="text"
+                    value={prompt}
+                    onChange={(e) => setPrompt(e.target.value)}
+                    placeholder="e.g., A robot holding a red skateboard in a photorealistic style"
+                    className="flex-grow bg-brand-surface-alt text-brand-text placeholder-brand-text-muted rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-brand-primary"
+                    disabled={isLoading}
+                />
+                <button type="submit" className="bg-brand-primary text-white rounded-lg px-6 py-3 font-semibold hover:bg-brand-primary-hover disabled:bg-brand-surface-alt disabled:cursor-not-allowed" disabled={isLoading || !prompt.trim()}>
+                    {isLoading ? 'Generating...' : 'Generate'}
+                </button>
+            </form>
+            
+            <div className="flex-1 flex items-center justify-center bg-brand-surface rounded-xl border border-brand-surface-alt">
+                {isLoading && (
+                     <div className="flex flex-col items-center text-brand-text-muted">
+                        <svg className="animate-spin -ml-1 mr-3 h-10 w-10 text-brand-primary" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        <p className="mt-4">Landino is creating your masterpiece...</p>
+                    </div>
+                )}
+                {error && <p className="text-red-400 text-center p-4">{error}</p>}
+                {generatedImage && (
+                    <img 
+                        src={generatedImage} 
+                        alt={prompt} 
+                        className="max-w-full max-h-full object-contain rounded-lg"
+                    />
+                )}
+                {!isLoading && !error && !generatedImage && (
+                    <div className="text-center text-brand-text-muted">
+                        <p>Enter a prompt above to create an image.</p>
+                        <p className="text-sm">The possibilities are endless!</p>
+                    </div>
+                )}
+            </div>
+        </div>
+    );
+};
+
+
+// --- From screens/SettingsView.tsx ---
+const SettingsView = ({ onClearChat, onClearHistory, systemInstruction, onSystemInstructionChange, defaultSystemInstruction }) => {
+  const [editableInstruction, setEditableInstruction] = useState(systemInstruction);
+
+  const handleClearHistory = () => {
+    if (window.confirm('Are you sure you want to delete ALL conversations? This action cannot be undone.')) {
+        onClearHistory();
+    }
+  }
+
+  const handleSaveInstruction = () => {
+    onSystemInstructionChange(editableInstruction);
+    alert('AI personality updated!');
+  };
+
+  const handleResetInstruction = () => {
+    setEditableInstruction(defaultSystemInstruction);
+  };
+
+  return (
+    <div className="flex-1 flex flex-col bg-brand-bg p-8 overflow-y-auto">
+        <div className="flex items-center gap-3 mb-8">
+            <SettingsIcon className="w-10 h-10 text-brand-primary" />
+            <h1 className="text-3xl font-bold text-brand-text">Settings</h1>
+        </div>
+
+        <div className="space-y-8 max-w-2xl">
+            <div className="bg-brand-surface rounded-xl border border-brand-surface-alt p-6">
+                <h2 className="text-xl font-semibold text-brand-text mb-2">AI Personality</h2>
+                <p className="text-brand-text-muted mb-4">Customize how Landino behaves by changing its system instruction.</p>
+                <textarea
+                    value={editableInstruction}
+                    onChange={(e) => setEditableInstruction(e.target.value)}
+                    rows={6}
+                    className="w-full bg-brand-surface-alt text-brand-text placeholder-brand-text-muted rounded-lg p-3 focus:outline-none focus:ring-2 focus:ring-brand-primary"
+                />
+                <div className="flex items-center gap-4 mt-4">
+                    <button 
+                        onClick={handleSaveInstruction}
+                        className="flex items-center gap-2 bg-brand-primary text-white font-semibold px-4 py-2 rounded-lg hover:bg-brand-primary-hover transition-colors"
+                    >
+                        <CheckIcon className="w-5 h-5"/>
+                        <span>Save Personality</span>
+                    </button>
+                     <button 
+                        onClick={handleResetInstruction}
+                        className="text-brand-text-muted font-semibold px-4 py-2 rounded-lg hover:bg-brand-surface-alt hover:text-brand-text transition-colors"
+                    >
+                        Reset to Default
+                    </button>
+                </div>
+            </div>
+
+            <div className="bg-brand-surface rounded-xl border border-brand-surface-alt p-6">
+                <h2 className="text-xl font-semibold text-brand-text mb-2">Data Management</h2>
+                <p className="text-brand-text-muted mb-4">Manage your conversation data.</p>
+                
+                <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <h3 className="text-brand-text font-medium">Clear Current Conversation</h3>
+                            <p className="text-sm text-brand-text-muted">This will start a new chat session.</p>
+                        </div>
+                        <button 
+                            onClick={onClearChat}
+                            className="flex items-center gap-2 bg-yellow-600/20 text-yellow-400 font-semibold px-4 py-2 rounded-lg hover:bg-yellow-600/40 hover:text-yellow-300 transition-colors"
+                        >
+                            <TrashIcon className="w-5 h-5"/>
+                            <span>New Chat</span>
+                        </button>
+                    </div>
+                     <div className="flex items-center justify-between">
+                        <div>
+                            <h3 className="text-brand-text font-medium">Clear All History</h3>
+                            <p className="text-sm text-brand-text-muted">Permanently delete all saved conversations.</p>
+                        </div>
+                        <button 
+                            onClick={handleClearHistory}
+                            className="flex items-center gap-2 bg-red-600/20 text-red-400 font-semibold px-4 py-2 rounded-lg hover:bg-red-600/40 hover:text-red-300 transition-colors"
+                        >
+                            <TrashIcon className="w-5 h-5"/>
+                            <span>Clear All</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+  );
+};
+
+
+// --- From screens/UltraJsView.tsx ---
+const ULTRA_JS_SYSTEM_INSTRUCTION = `You are an expert JavaScript developer specializing in the HTML5 Canvas API.
+Your task is to generate creative and interesting JavaScript code to draw on a canvas.
+The user will provide a prompt, and you must return ONLY a JSON object with a single key "code".
+The value of "code" should be a string of JavaScript code. Do not include 'javascript' markdown fences.
+
+The code will be executed within a function that has access to these variables in its scope:
+- 'canvas': The HTMLCanvasElement.
+- 'ctx': The 2D rendering context of the canvas.
+- 'requestAnimationFrame': The browser's animation frame function. Use this for animations.
+- 'cancelAnimationFrame': The browser's function to cancel an animation frame.
+
+You can access canvas properties like \`canvas.width\` and \`canvas.height\`.
+For animations, you MUST use the provided \`requestAnimationFrame\` function for smooth looping.
+
+Do not write any conversational text or explanations. Only provide the JSON object.
+
+Example for an animation:
+{
+  "code": "let x = 0;\\nfunction animate() {\\n  ctx.clearRect(0, 0, canvas.width, canvas.height);\\n  ctx.fillStyle = 'blue';\\n  ctx.fillRect(x, 50, 50, 50);\\n  x = (x + 1) % canvas.width;\\n  requestAnimationFrame(animate);\\n}\\nanimate();"
+}`;
+
+const ULTRA_JS_DEFAULT_CODE = `// Welcome to Ultra JS!
+// Describe a visual or animation and click Generate.
+// Example: "a field of falling stars"
+
+ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+ctx.font = '24px sans-serif';
+ctx.textAlign = 'center';
+ctx.fillText('Hello, Ultra JS!', canvas.width / 2, canvas.height / 2);
+`;
+
+const UltraJsView = () => {
+    const [prompt, setPrompt] = useState('');
+    const [code, setCode] = useState(ULTRA_JS_DEFAULT_CODE);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState(null);
+    
+    const canvasRef = useRef(null);
+    const containerRef = useRef(null);
+    const animationFrameId = useRef(null);
+
+    const executeCode = useCallback((codeToRun) => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+    
+        if (animationFrameId.current) {
+            cancelAnimationFrame(animationFrameId.current);
+        }
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+        const customRAF = (callback) => {
+            const id = requestAnimationFrame(callback);
+            animationFrameId.current = id;
+            return id;
+        };
+
+        try {
+            setError(null);
+            const runnable = new Function('canvas', 'ctx', 'requestAnimationFrame', 'cancelAnimationFrame', codeToRun);
+            runnable(canvas, ctx, customRAF, cancelAnimationFrame);
+        } catch (e) {
+            console.error("ULTRA JS Execution Error:", e);
+            const errorMessage = e instanceof Error ? e.message : String(e);
+            setError(`Execution Error: ${errorMessage}`);
+            // Draw error on canvas
+            ctx.fillStyle = 'rgba(255, 20, 20, 0.8)';
+            ctx.font = '16px monospace';
+            ctx.textAlign = 'left';
+            ctx.fillText(errorMessage, 10, 30);
+        }
+    }, []);
+
+    useEffect(() => {
+        const resizeCanvas = () => {
+            const canvas = canvasRef.current;
+            const container = containerRef.current;
+            if (canvas && container) {
+                canvas.width = container.clientWidth;
+                canvas.height = container.clientHeight;
+                executeCode(code); // Re-run code on resize to adapt to new dimensions
+            }
+        };
+
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+        
+        // Run initial code
+        executeCode(code);
+
+        return () => {
+            window.removeEventListener('resize', resizeCanvas);
+            if (animationFrameId.current) {
+                cancelAnimationFrame(animationFrameId.current);
+            }
+        };
+    }, [code, executeCode]);
+    
+
+    const handleGenerate = async (e) => {
+        e.preventDefault();
+        if (!prompt.trim()) return;
+
+        setIsLoading(true);
+        setError(null);
+
+        try {
+             const response = await ai.models.generateContent({
+                model: "gemini-2.5-flash-preview-04-17",
+                contents: `${ULTRA_JS_SYSTEM_INSTRUCTION}\\n\\nUser prompt: "${prompt}"`,
+                config: {
+                    responseMimeType: "application/json",
+                },
+             });
+
+            let jsonStr = response.text.trim();
+            const fenceRegex = /^```(\\w*)?\\s*\\n?(.*?)\\n?\\s*```$/s;
+            const match = jsonStr.match(fenceRegex);
+            if (match && match[2]) {
+                jsonStr = match[2].trim();
+            }
+
+            const parsed = JSON.parse(jsonStr);
+            if (typeof parsed.code === 'string') {
+                setCode(parsed.code);
+            } else {
+                throw new Error("Invalid response format from AI. Expected a 'code' key.");
+            }
+        } catch (err) {
+            console.error("Ultra JS Generation error:", err);
+            const errorMessage = err instanceof Error ? err.message : 'Failed to generate code.';
+            setError(`API Error: ${errorMessage}`);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    return (
+        <div className="flex-1 flex flex-col lg:flex-row bg-brand-bg overflow-hidden">
+            {/* Control Panel */}
+            <div className="w-full lg:w-1/3 xl:w-1/4 p-4 lg:p-6 flex flex-col border-b lg:border-b-0 lg:border-r border-brand-surface-alt overflow-y-auto">
+                <div className="flex items-center gap-3 mb-4">
+                    <CodeBracketIcon className="w-8 h-8 text-brand-primary" />
+                    <h1 className="text-2xl font-bold text-brand-text">Ultra JS</h1>
+                </div>
+                <p className="text-brand-text-muted mb-6 text-sm">Describe a visual or animation, and Landino will write the code. Then, hit 'Run' to bring it to life on the canvas.</p>
+                
+                <form onSubmit={handleGenerate} className="flex flex-col gap-4">
+                    <textarea
+                        value={prompt}
+                        onChange={(e) => setPrompt(e.target.value)}
+                        placeholder="e.g., A bouncing ball that changes color"
+                        className="flex-grow bg-brand-surface-alt text-brand-text placeholder-brand-text-muted rounded-lg p-3 h-24 resize-none focus:outline-none focus:ring-2 focus:ring-brand-primary"
+                        disabled={isLoading}
+                    />
+                    <button type="submit" className="bg-brand-primary text-white rounded-lg px-6 py-3 font-semibold hover:bg-brand-primary-hover disabled:bg-brand-surface-alt disabled:cursor-not-allowed" disabled={isLoading || !prompt.trim()}>
+                        {isLoading ? 'Generating...' : 'Generate Code'}
+                    </button>
+                </form>
+                {error && <p className="text-red-400 text-xs mt-4 p-2 bg-red-500/10 rounded-md">{error}</p>}
+            </div>
+
+            {/* Code & Canvas */}
+            <div className="flex-1 flex flex-col p-4 gap-4">
+                <div className="flex-1 flex flex-col min-h-0">
+                     <textarea
+                        value={code}
+                        onChange={(e) => setCode(e.target.value)}
+                        className="w-full h-1/2 flex-grow bg-brand-surface text-brand-text-muted font-mono text-sm p-4 rounded-t-lg border border-b-0 border-brand-surface-alt resize-none focus:outline-none focus:ring-2 focus:ring-brand-primary"
+                        spellCheck="false"
+                    />
+                     <button onClick={() => executeCode(code)} className="w-full bg-brand-primary text-white rounded-b-lg px-6 py-2 font-semibold hover:bg-brand-primary-hover">
+                        Run
+                    </button>
+                </div>
+
+                <div ref={containerRef} className="flex-1 bg-brand-surface rounded-lg border border-brand-surface-alt overflow-hidden min-h-0">
+                    <canvas ref={canvasRef} className="w-full h-full" />
+                </div>
+            </div>
+        </div>
+    );
+};
+
+
+// --- From screens/GameView.tsx (New File) ---
+const GAME_SYSTEM_INSTRUCTION = `You are an expert interactive fiction writer and game master.
+You will create a dynamic, text-based adventure game based on a theme provided by the user.
+1. When the user gives you a theme, respond with a compelling opening scene that sets the stage, describes the environment, and presents an immediate situation or choice.
+2. Your world should be descriptive and immersive. Use sensory details.
+3. You must wait for the user's command after each of your descriptions. Do not write the user's actions for them.
+4. Respond to user commands logically. The world should have a consistent state.
+5. Keep the tone consistent with the theme (e.g., mysterious for a detective story, epic for a fantasy quest).
+6. Present challenges, puzzles, and non-player characters (NPCs).
+7. Your responses should be just your narration as the game master. Do not break character. Do not use markdown. Just present the story and await input.`;
+
+const GameView = () => {
+    const [theme, setTheme] = useState('');
+    const [gameLog, setGameLog] = useState([]);
+    const [playerInput, setPlayerInput] = useState('');
+    const [chat, setChat] = useState(null);
+    const [isLoading, setIsLoading] = useState(false);
+    const [isGameStarted, setIsGameStarted] = useState(false);
+    const logRef = useRef(null);
+
+    useEffect(() => {
+        logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: 'smooth' });
+    }, [gameLog]);
+
+    const startNewGame = async (e) => {
+        e.preventDefault();
+        if (!theme.trim() || isLoading) return;
+        setIsLoading(true);
+        setIsGameStarted(true);
+        setGameLog([]);
+        
+        const newChat = createChat(GAME_SYSTEM_INSTRUCTION);
+        setChat(newChat);
+        
+        const openingPrompt = `Start a text-based adventure game with the theme: "${theme}"`;
+        
+        try {
+            const stream = await newChat.sendMessageStream({ message: openingPrompt });
+            let responseText = '';
+            for await (const chunk of stream) {
+                responseText += chunk.text;
+            }
+            setGameLog(prev => [{ sender: 'ai', text: responseText }]);
+        } catch (e) {
+            console.error(e);
+            setGameLog([{ sender: 'ai', text: "Sorry, I couldn't start the game. Please try a different theme." }]);
+            setIsGameStarted(false);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    const sendPlayerAction = async (e) => {
+        e.preventDefault();
+        if (!playerInput.trim() || !chat || isLoading) return;
+        
+        const actionText = playerInput;
+        setPlayerInput('');
+        setIsLoading(true);
+        setGameLog(prev => [...prev, { sender: 'user', text: actionText }]);
+        
+        try {
+            const stream = await chat.sendMessageStream({ message: actionText });
+            let responseText = '';
+            for await (const chunk of stream) {
+                responseText += chunk.text;
+            }
+            setGameLog(prev => [...prev, { sender: 'ai', text: responseText }]);
+        } catch (e) {
+            console.error(e);
+            setGameLog(prev => [...prev, { sender: 'ai', text: "An ancient curse seems to be interfering... Please try your action again." }]);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+    if (!isGameStarted) {
+        return (
+            <div className="flex-1 flex flex-col items-center justify-center bg-brand-bg p-8">
+                <GameControllerIcon className="w-24 h-24 text-brand-primary mb-6" />
+                <h1 className="text-4xl font-bold text-brand-text mb-2">AI Adventure Games</h1>
+                <p className="text-brand-text-muted mb-8 max-w-lg text-center">Describe a world, a scenario, or a character, and Landino will craft a unique text-based adventure for you to play.</p>
+                <form onSubmit={startNewGame} className="w-full max-w-lg flex gap-3">
+                    <input
+                        type="text"
+                        value={theme}
+                        onChange={(e) => setTheme(e.target.value)}
+                        placeholder="e.g., A detective in a cyberpunk city"
+                        className="flex-grow bg-brand-surface-alt text-brand-text placeholder-brand-text-muted rounded-lg px-4 py-3 focus:outline-none focus:ring-2 focus:ring-brand-primary"
+                        disabled={isLoading}
+                    />
+                    <button type="submit" className="bg-brand-primary text-white rounded-lg px-6 py-3 font-semibold hover:bg-brand-primary-hover disabled:bg-brand-surface-alt disabled:cursor-not-allowed" disabled={isLoading || !theme.trim()}>
+                        {isLoading ? 'Creating...' : 'Start Adventure'}
+                    </button>
+                </form>
+            </div>
+        );
+    }
+
+    return (
+        <div className="flex-1 flex flex-col bg-brand-bg font-mono overflow-hidden">
+            <div ref={logRef} className="flex-1 overflow-y-auto p-6 lg:p-8 space-y-6">
+                {gameLog.map((entry, index) => (
+                    <div key={index}>
+                        {entry.sender === 'ai' ? (
+                            <p className="text-brand-text whitespace-pre-wrap">{entry.text}</p>
+                        ) : (
+                            <p className="text-brand-primary whitespace-pre-wrap">{`> ${entry.text}`}</p>
+                        )}
+                    </div>
+                ))}
+                {isLoading && gameLog.length > 0 && (
+                    <p className="text-brand-text-muted animate-pulse">Landino is weaving the next part of your story...</p>
+                )}
+            </div>
+            <div className="bg-brand-surface/70 backdrop-blur-sm p-4 border-t border-brand-surface-alt">
+                <form onSubmit={sendPlayerAction} className="max-w-4xl mx-auto flex items-center gap-3">
+                    <span className="text-brand-primary font-bold text-lg">{'>'}</span>
+                    <input
+                        type="text"
+                        value={playerInput}
+                        onChange={(e) => setPlayerInput(e.target.value)}
+                        placeholder="What do you do next?"
+                        className="flex-grow bg-transparent text-brand-text placeholder-brand-text-muted focus:outline-none"
+                        disabled={isLoading}
+                        autoFocus
+                    />
+                    <button type="submit" disabled={isLoading || !playerInput.trim()} className="text-brand-primary hover:text-white disabled:text-brand-text-muted transition-colors">
+                        <SendIcon className="w-6 h-6" />
+                    </button>
+                </form>
+            </div>
+        </div>
+    );
+};
+
+// --- From screens/ChatView.tsx ---
+const ChatView = ({ aiAvatarUrl, messages, setMessages, systemInstruction, conversationId, taskHandlers }) => {
+  const [isLoading, setIsLoading] = useState(false);
+  const [isSearchEnabled, setIsSearchEnabled] = useState(false);
+  const [chat, setChat] = useState(null);
+  const chatLogRef = useRef(null);
+
+  const tools = [
+      {
+        functionDeclarations: [
+          {
+            name: 'addTask',
+            description: "Adds a new task to the user's to-do list.",
+            parameters: {
+              type: Type.OBJECT,
+              properties: {
+                text: {
+                  type: Type.STRING,
+                  description: 'The content of the task. e.g., "Buy milk"',
+                },
+              },
+              required: ['text'],
+            },
+          },
+          {
+            name: 'listTasks',
+            description: "Lists all the user's current tasks, with an optional filter.",
+            parameters: {
+              type: Type.OBJECT,
+              properties: {
+                filter: {
+                  type: Type.STRING,
+                  description: 'Optional filter for tasks. Can be "all", "completed", or "pending". Defaults to "all".',
+                  enum: ['all', 'completed', 'pending'],
+                },
+              },
+            },
+          },
+        ],
+      },
+    ];
+
+  useEffect(() => {
+    const history = convertMessagesToHistory(messages);
+    const newChat = createChat(systemInstruction, history);
+    setChat(newChat);
+  }, [systemInstruction, conversationId]);
+
+  const scrollToBottom = () => {
+    chatLogRef.current?.scrollTo({ top: chatLogRef.current.scrollHeight, behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  const handleSendMessage = async (text) => {
+    if (!chat) return;
+
+    const userMessage = {
+      id: Date.now().toString(),
+      text,
+      sender: MessageSender.USER,
+    };
+    setMessages((prev) => [...prev, userMessage]);
+    setIsLoading(true);
+
+    try {
+      const config = {
+          tools: isSearchEnabled ? [{ googleSearch: {} }, ...tools] : tools
+      }
+      
+      const stream = await chat.sendMessageStream({ message: text, config });
+      
+      let aiResponseText = '';
+      let sources = [];
+      let functionCalls = [];
+      const aiMessageId = (Date.now() + 1).toString();
+
+      setMessages((prev) => [
+        ...prev,
+        { id: aiMessageId, text: '...', sender: MessageSender.AI },
+      ]);
+
+      for await (const chunk of stream) {
+        aiResponseText += chunk.text;
+        if (chunk.functionCalls) {
+            functionCalls.push(...chunk.functionCalls);
+        }
+        
+        const newSources = chunk.candidates?.[0]?.groundingMetadata?.groundingChunks
+            ?.map(c => c.web)
+            .filter((c) => c !== undefined) || [];
+        
+        if (newSources.length > 0) {
+            sources = [...new Map([...sources, ...newSources].map(item => [item.uri, item])).values()];
+        }
+        
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === aiMessageId ? { ...msg, text: aiResponseText || '...', sources } : msg
+          )
+        );
+      }
+      
+      if (functionCalls.length > 0) {
+          const toolResponses = [];
+          for (const call of functionCalls) {
+              let result;
+              if (call.name === 'addTask' && taskHandlers.addTask) {
+                  result = taskHandlers.addTask(call.args.text);
+              } else if (call.name === 'listTasks' && taskHandlers.listTasks) {
+                  result = taskHandlers.listTasks(call.args.filter);
+              }
+              if (result) {
+                 toolResponses.push({
+                    functionResponse: {
+                        name: call.name,
+                        response: { result },
+                    },
+                 });
+              }
+          }
+
+          if (toolResponses.length > 0) {
+              const toolStream = await chat.sendMessageStream(toolResponses);
+
+              aiResponseText = ''; // Reset for the final text response
+
+              for await (const chunk of toolStream) {
+                  aiResponseText += chunk.text;
+                   setMessages((prev) =>
+                      prev.map((msg) =>
+                        msg.id === aiMessageId ? { ...msg, text: aiResponseText, sources } : msg
+                      )
+                    );
+              }
+          }
+      }
+
+    } catch (error) {
+      console.error("Gemini API error:", error);
+      const errorMessage = {
+        id: (Date.now() + 1).toString(),
+        text: "Sorry, I encountered an error. Please try again.",
+        sender: MessageSender.AI,
+      };
+      setMessages((prev) => [...prev.slice(0, -1), errorMessage]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="flex-1 flex flex-col bg-brand-bg">
+      <div ref={chatLogRef} className="flex-1 overflow-y-auto p-6 space-y-6">
+        {messages.length === 0 ? (
+           <div className="flex flex-col items-center justify-center h-full text-brand-text-muted">
+            {aiAvatarUrl ? (
+                <img src={aiAvatarUrl} alt="Landino" className="w-24 h-24 rounded-full object-cover mb-4" />
+            ) : (
+                <BotIcon className="w-24 h-24 mb-4" />
+            )}
+             <h2 className="text-2xl font-semibold">Start a conversation</h2>
+             <p>Ask me anything or just say hello!</p>
+           </div>
+        ) : (
+          messages.map((msg) => <ChatMessage key={msg.id} message={msg} avatarUrl={aiAvatarUrl} />)
+        )}
+      </div>
+      <ChatInput 
+        onSendMessage={handleSendMessage} 
+        isLoading={isLoading}
+        isSearchEnabled={isSearchEnabled}
+        onSearchToggle={() => setIsSearchEnabled(prev => !prev)}
+      />
+    </div>
+  );
+};
+
+
+// --- From components/Sidebar.tsx ---
+const NavItem = ({ icon: Icon, label, isActive, onClick }) => (
+  <button
+    onClick={onClick}
+    className={`flex items-center w-full px-4 py-3 text-sm font-medium rounded-lg transition-colors duration-200 ${
+      isActive
+        ? 'bg-brand-primary text-white'
+        : 'text-brand-text-muted hover:bg-brand-surface-alt hover:text-brand-text'
+    }`}
+  >
+    <Icon className="w-6 h-6 mr-3" />
+    <span>{label}</span>
+  </button>
+);
+
+const Sidebar = ({ activeView, onViewChange, onStartNewChat, onLogout, aiAvatarUrl, onAvatarChange }) => {
+    const fileInputRef = useRef(null);
+
+    const handleAvatarClick = () => {
+        fileInputRef.current?.click();
+    };
+
+    const handleFileChange = (event) => {
+        const file = event.target.files?.[0];
+        if (file) {
+            onAvatarChange(file);
+        }
+    };
+
+  return (
+    <aside className="w-64 bg-brand-surface p-4 flex-col flex-shrink-0 border-r border-brand-surface-alt hidden md:flex">
+      <div className="flex items-center gap-3 mb-8 px-2">
+        {aiAvatarUrl ? (
+             <img src={aiAvatarUrl} alt="Landino Avatar" className="w-10 h-10 rounded-full object-cover" />
+        ) : (
+            <BotIcon className="w-10 h-10 text-brand-primary" />
+        )}
+        <h1 className="text-xl font-bold">Landino AI</h1>
+      </div>
+
+      <nav className="flex-1 space-y-2">
+        <NavItem
+          icon={NewChatIcon}
+          label="New Chat"
+          isActive={activeView === 'new-chat'}
+          onClick={onStartNewChat}
+        />
+        <NavItem
+          icon={HistoryIcon}
+          label="History"
+          isActive={activeView === 'history'}
+          onClick={() => onViewChange('history')}
+        />
+        <NavItem
+          icon={TasksIcon}
+          label="Tasks"
+          isActive={activeView === 'tasks'}
+          onClick={() => onViewChange('tasks')}
+        />
+         <NavItem
+          icon={ImageIcon}
+          label="Image Generation"
+          isActive={activeView === 'image-generation'}
+          onClick={() => onViewChange('image-generation')}
+        />
+         <NavItem
+          icon={CodeBracketIcon}
+          label="Ultra JS"
+          isActive={activeView === 'ultra-js'}
+          onClick={() => onViewChange('ultra-js')}
+        />
+        <NavItem
+          icon={GameControllerIcon}
+          label="Games"
+          isActive={activeView === 'games'}
+          onClick={() => onViewChange('games')}
+        />
+        <NavItem
+          icon={SettingsIcon}
+          label="Settings"
+          isActive={activeView === 'settings'}
+          onClick={() => onViewChange('settings')}
+        />
+      </nav>
+
+      <div className="mt-auto space-y-2">
+         <button
+            onClick={handleAvatarClick}
+            className="flex items-center w-full px-4 py-3 text-sm font-medium rounded-lg text-brand-text-muted hover:bg-brand-surface-alt hover:text-brand-text transition-colors duration-200"
+        >
+            <UploadIcon className="w-6 h-6 mr-3" />
+            <span>Change Photo</span>
+            <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleFileChange}
+                accept="image/*"
+                className="hidden"
+            />
+        </button>
+        <button
+          onClick={onLogout}
+          className="flex items-center w-full px-4 py-3 text-sm font-medium rounded-lg text-brand-text-muted hover:bg-brand-surface-alt hover:text-brand-text transition-colors duration-200"
+        >
+          <LogoutIcon className="w-6 h-6 mr-3" />
+          <span>Logout</span>
+        </button>
+      </div>
+    </aside>
+  );
+};
+
+
+// --- From components/AppLayout.tsx ---
+const AppLayout = ({ onLogout, aiAvatarUrl, onAvatarChange, systemInstruction, onSystemInstructionChange }) => {
+  const [activeView, setActiveView] = useState('new-chat');
+  const [messages, setMessages] = useState([]);
+  const [currentConversationId, setCurrentConversationId] = useState(null);
+  const { history, isLoaded, saveConversation, deleteConversation, clearAllHistory } = useHistory();
+  const { tasks, addTask, deleteTask, toggleTask, listTasks } = useTasks();
+
+  const handleSaveCurrentChat = useCallback(() => {
+    if (messages.length > 0) {
+      const conversationToSave = {
+        id: currentConversationId || Date.now().toString(),
+        title: messages.find(m => m.sender === 'user')?.text.substring(0, 40) || 'Untitled Chat',
+        messages: messages,
+        timestamp: Date.now(),
+      };
+      saveConversation(conversationToSave);
+      return conversationToSave.id;
+    }
+    return null;
+  }, [messages, currentConversationId, saveConversation]);
+
+  const startNewChat = useCallback(() => {
+    handleSaveCurrentChat();
+    setMessages([]);
+    setCurrentConversationId(null);
+    setActiveView('new-chat');
+  }, [handleSaveCurrentChat]);
+
+  const loadConversation = useCallback((conversation) => {
+    handleSaveCurrentChat();
+    setMessages(conversation.messages);
+    setCurrentConversationId(conversation.id);
+    setActiveView('new-chat');
+  }, [handleSaveCurrentChat]);
+
+  const handleViewChange = useCallback((view) => {
+     if (activeView === 'new-chat' && view !== 'new-chat') {
+        handleSaveCurrentChat();
+     }
+     setActiveView(view);
+  }, [activeView, handleSaveCurrentChat]);
+
+  const renderActiveView = () => {
+    switch (activeView) {
+      case 'new-chat':
+        return <ChatView 
+                    aiAvatarUrl={aiAvatarUrl} 
+                    messages={messages} 
+                    setMessages={setMessages}
+                    systemInstruction={systemInstruction}
+                    conversationId={currentConversationId}
+                    taskHandlers={{ addTask, listTasks }}
+                />;
+      case 'history':
+        return <HistoryView 
+                    history={history} 
+                    isLoaded={isLoaded}
+                    onLoadConversation={loadConversation} 
+                    onDeleteConversation={deleteConversation} 
+                />;
+      case 'tasks':
+        return <TasksView 
+                    tasks={tasks}
+                    onAddTask={addTask}
+                    onDeleteTask={deleteTask}
+                    onToggleTask={toggleTask}
+                />;
+      case 'image-generation':
+        return <ImageGenerationView />;
+      case 'ultra-js':
+        return <UltraJsView />;
+      case 'games':
+        return <GameView />;
+      case 'settings':
+        return <SettingsView 
+                    onClearChat={startNewChat} 
+                    onClearHistory={clearAllHistory}
+                    systemInstruction={systemInstruction}
+                    onSystemInstructionChange={onSystemInstructionChange}
+                    defaultSystemInstruction={DEFAULT_SYSTEM_INSTRUCTION}
+                />;
+      default:
+        return <ChatView 
+                    aiAvatarUrl={aiAvatarUrl} 
+                    messages={messages} 
+                    setMessages={setMessages} 
+                    systemInstruction={systemInstruction}
+                    conversationId={currentConversationId}
+                    taskHandlers={{ addTask, listTasks }}
+                />;
+    }
+  };
+
+  return (
+    <div className="flex h-screen bg-brand-bg text-brand-text antialiased">
+      <Sidebar
+        activeView={activeView}
+        onViewChange={handleViewChange}
+        onStartNewChat={startNewChat}
+        onLogout={onLogout}
+        aiAvatarUrl={aiAvatarUrl}
+        onAvatarChange={onAvatarChange}
+      />
+      <main className="flex-1 flex flex-col overflow-hidden">
+        {renderActiveView()}
+      </main>
+    </div>
+  );
+};
+
+
+// --- From App.tsx ---
+const App = () => {
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [aiAvatarUrl, setAiAvatarUrl] = useState(null);
+  const [systemInstruction, setSystemInstruction] = useState(DEFAULT_SYSTEM_INSTRUCTION);
+
+  const handleLogin = () => setIsAuthenticated(true);
+  const handleLogout = () => {
+    setIsAuthenticated(false);
+    setAiAvatarUrl(null);
+    setSystemInstruction(DEFAULT_SYSTEM_INSTRUCTION);
+  };
+  
+  const handleAvatarChange = useCallback((file) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      setAiAvatarUrl(e.target?.result);
+    };
+    reader.readAsDataURL(file);
+  }, []);
+
+  if (!isAuthenticated) {
+    return <LoginScreen onLogin={handleLogin} />;
+  }
+
+  return (
+    <AppLayout
+      onLogout={handleLogout}
+      aiAvatarUrl={aiAvatarUrl}
+      onAvatarChange={handleAvatarChange}
+      systemInstruction={systemInstruction}
+      onSystemInstructionChange={setSystemInstruction}
+    />
+  );
+};
+
+
+// --- From index.tsx ---
+const rootElement = document.getElementById('root');
+if (!rootElement) {
+  throw new Error("Could not find root element to mount to");
+}
+
+const root = ReactDOM.createRoot(rootElement);
+root.render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
+    </script>
+  </body>
+</html>
