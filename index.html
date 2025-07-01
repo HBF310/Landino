@@ -42,7 +42,7 @@
     <script type="text/babel" data-type="module">
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ReactDOM from 'react-dom/client';
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI } from "@google/genai";
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import Babel from '@babel/standalone';
@@ -1217,10 +1217,10 @@ const ChatView = ({ aiAvatarUrl, messages, setMessages, systemInstruction, conve
             name: 'addTask',
             description: "Adds a new task to the user's to-do list.",
             parameters: {
-              type: Type.OBJECT,
+              type: 'OBJECT',
               properties: {
                 text: {
-                  type: Type.STRING,
+                  type: 'STRING',
                   description: 'The content of the task. e.g., "Buy milk"',
                 },
               },
@@ -1231,10 +1231,10 @@ const ChatView = ({ aiAvatarUrl, messages, setMessages, systemInstruction, conve
             name: 'listTasks',
             description: "Lists all the user's current tasks, with an optional filter.",
             parameters: {
-              type: Type.OBJECT,
+              type: 'OBJECT',
               properties: {
                 filter: {
-                  type: Type.STRING,
+                  type: 'STRING',
                   description: 'Optional filter for tasks. Can be "all", "completed", or "pending". Defaults to "all".',
                   enum: ['all', 'completed', 'pending'],
                 },
